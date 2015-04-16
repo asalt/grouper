@@ -1,0 +1,119 @@
+import re, csv, os, sys
+from datetime import datetime
+import pandas as pd
+startTime = datetime.now()
+print 'Python version ' + sys.version
+print 'Pandas version: ' + pd.__version__
+# Here we are also splitting our GeneList and duplicating all rows from that split. Instead of checking for data_tGeneList
+# we are checking for GeneID when ranking peptides.
+
+
+def SeqModi(query, modis):
+    modtext = {'(Destreak)' : '(des)', '(Deamidated)' : '(dam)', '(Carbamidomethyl)' : '(car)', '(Oxidation)' : '(oxi)', '(Phospho)' : '(pho)',
+    '(Acetyl)': '(ace)', '(GlyGly)' : '(gg)', '(Label:13C(6))' : '(lab)', '(Label:13C(6)+GlyGly)' : '(labgg)'}
+       
+    if any(c for c in query if c.islower()):
+        modpos = re.findall(r'([0-9]+)',modis)
+        modpos = [int(d) for d in modpos]
+        modkeys = re.findall(r'(\(\w+\))',modis)
+        if 'N-Term' in modis: modpos.insert(0,1)
+        for k in xrange(len(modpos)):
+            try: 
+                query = query.replace(query[modpos[k]-1],query[modpos[k]-1].upper()+modtext[modkeys[k]]) 
+                modpos[(k+1):] = [x+len(modtext[modkeys[k]]) for x in modpos[(k+1):]] # do this if there are more things to do
+            except:
+                query = query.replace(query[modpos[k]-1],modkeys[k])
+                modpos[(k+1):] = [x+len(modkeys[k]) for x in modpos[(k+1):]]
+                
+        return [query, len(modpos)]
+    else: return [query,0]
+
+#peptidome = 'peptidome_11188.tab'
+#Load in proteome data 
+
+#proteome = pd.read_csv('human_RefSeq_20130704.tab', sep = '\t', dtype=str)
+with open('human_RefSeq_20130704.tab','rU') as f:
+    reader = csv.reader(f,delimiter='\t')
+    proteome = list(reader)   
+    
+filepicker = raw_input('Full file or short?')
+if 'f' in filepicker :
+    print 'Using full file'
+    resultfile='11188_00F_M14_DIMC_PROF_all_45min_025_psms.txt'
+else:
+    print 'Using truncated filed'
+    resultfile='short_11188_00F_M14_DIMC_PROF_all_45min_025_psms.txt'
+print 'Start at {}'.format(startTime)
+    
+resultout = re.sub(r'(\.\w+)','_out_.tab',resultfile)
+usrdata = pd.read_csv(resultfile, sep='\t')
+taxonID = '9606'
+newcols = ['data_PSM_IDG','data_TaxonID','data_tProteinList','data_tGeneList','data_GeneCount', \
+            'data_PeptRank','data_SequenceModi','data_SequenceModiCount']
+for k in newcols: usrdata[k] = ''*len(usrdata)
+
+
+#refseq = SeqIO.parse("human_protein_faa/human_protein_faa_2013_0704.tab","fasta")
+
+taxonID = '9606'
+usrdata['data_TaxonID'] = taxonID
+
+for k in xrange(1,len(usrdata)): #start at 1 since 0 is the header
+
+    #if k%50 == 0: print k
+    try: 
+        IonScore_k = usrdata['IonScore'].ix[k]
+        qValue_k = usrdata['q-Value'].ix[k]
+        if IonScore_k >= 30 and qValue_k <= .01: IDGout = '1'
+        elif IonScore_k >= 30 and qValue_k <= .05: IDGout = '2'
+        elif IonScore_k >= 20 and qValue_k <= .01: IDGout = '3'
+        elif IonScore_k >= 20 and qValue_k <= .05: IDGout = '4'
+        elif IonScore_k >= 10 and qValue_k <= .01: IDGout = '5'       
+        elif IonScore_k >= 10 and qValue_k <= .05: IDGout = '6'
+        elif IonScore_k >= 0 and qValue_k <= .01: IDGout = '7'
+        elif IonScore_k >= 0 and qValue_k <= .05: IDGout = '8'
+
+    except: IDGout = '9' #special case for when ion score or qvalue is missing
+    usrdata.loc[k,'data_PSM_IDG'] = IDGout
+    
+    [query, modis] = usrdata.loc[k,['Sequence','Modifications']]
+    [SeqModi_out, SeqModisCnt] = SeqModi(query, modis)
+    usrdata.loc[k,['data_SequenceModi','data_SequenceModiCount']] = [SeqModi_out,SeqModisCnt]
+    GeneList = []
+    ProteinList = []
+    for ii in xrange(len(proteome)):  # note this is a surprisingly fast way to do it 
+        if query.upper() in proteome[ii][4]:
+            if proteome[ii][2] not in GeneList : GeneList.append(proteome[ii][2])
+            if proteome[ii][3] not in ProteinList : ProteinList.append(proteome[ii][3])
+
+ 
+        # transpose the dataframe to store all GeneIDs in GeneList and all ProteinIDs in ProteinList
+    #[GeneList, ProteinList] = proteome[proteome['faa_FASTA'].str.contains(query.upper())][['faa_GeneID','faa_ProteinGI']].transpose().values
+    usrdata.loc[k,['data_tGeneList','data_tProteinList','data_GeneCount']] = [','.join(GeneList), ','.join(ProteinList),len(GeneList)]
+
+glstsplitter = usrdata['data_tGeneList'].str.split(',').apply(pd.Series, 1).stack()
+glstsplitter.index = glstsplitter.index.droplevel(-1)
+glstsplitter.name = 'GeneID'
+usrdata = usrdata.join(glstsplitter)   
+usrdata = usrdata.sort(['GeneID', 'Precursor Area', 'Sequence', 'Modifications', 'Charge', 'data_PSM_IDG', 'IonScore', 'PEP', 'q-Value'], ascending=[1,0,1,1,1,1,0,1,1])
+#cur_usr.execute("SELECT * FROM usrdata ORDER BY data_GeneList  ASC, [Precursor Area] DESC, Sequence ASC, Modifications ASC, Charge ASC, data_PSM_IDG ASC, IonScore DESC, PEP ASC, [q-Value] ASC") #replace a, b, c with headers and use ASC or DESC as necessary
+usrdata.index = range(1,len(usrdata) + 1)
+counter = 1
+for k in xrange(1,len(usrdata)-1):    
+    if usrdata.loc[k,'data_PeptRank'] == '': usrdata.loc[k,'data_PeptRank'] = counter
+
+    if (usrdata.loc[k,'GeneID'] == usrdata.loc[k+1,'GeneID'] and usrdata.loc[k,'Sequence'] == usrdata.loc[k+1,'Sequence'] and \
+        usrdata.loc[k,'Modifications'] == usrdata.loc[k+1,'Modifications'] and usrdata.loc[k,'Charge'] == usrdata.loc[k+1,'Charge']):
+        counter = 0 # marks secondary entries with zero instead of leaving empty
+
+    elif ((usrdata.loc[k,'GeneID'] == usrdata.loc[k+1,'GeneID'] and usrdata.loc[k,'Sequence'] == usrdata.loc[k+1,'Sequence']) and \
+        (usrdata.loc[k,'Modifications'] != usrdata.loc[k+1,'Modifications'] or usrdata.loc[k,'Charge']  != usrdata.loc[k+1,'Charge'] )) or \
+        (usrdata.loc[k,'GeneID'] == usrdata.loc[k+1,'GeneID'] and usrdata.loc[k,'Sequence']  != usrdata.loc[k+1,'Sequence'] ):    
+        counter += 1
+	
+    elif usrdata.loc[k,'GeneID'] != usrdata.loc[k+1,'GeneID']:
+        counter = 1
+    usrdata.loc[k+1,'data_PeptRank'] = counter
+    
+usrdata.to_csv(resultout,cols=usrdata.columns,encoding='utf-8',sep='\t')
+print 'Time taken : {}'.format(datetime.now() - startTime)
